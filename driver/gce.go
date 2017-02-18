@@ -250,9 +250,10 @@ func (d *gceDriver) getVolume(id string) (*gceVolume, error) {
 			"devicePath": vol.devicePath,
 			"mount":      vol.Path,
 		}).Info("GCE: found volume attachment")
+	} else {
+		log.WithFields(log.Fields{"disk": disk.Name}).Info("disk not attached to current instance")
 	}
 
-	log.WithFields(log.Fields{"disk": disk.Name}).Info("disk not attached to current instance")
 	return vol, nil
 }
 
