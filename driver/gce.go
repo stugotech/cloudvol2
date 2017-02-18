@@ -86,12 +86,17 @@ func NewGceDriver(mountPath string) (Driver, error) {
 		"project":  project,
 	}).Info("GCE: detected instance parameters")
 
+	instanceData, err := computeService.Instances.Get(project, zone, instance).Do()
+	if err != nil {
+		return nil, fmt.Errorf("GCE: error retrieving instance data: %v", err)
+	}
+
 	provider := &gceDriver{
 		client:      computeService,
 		instance:    instance,
 		zone:        zone,
 		project:     project,
-		instanceURI: fmt.Sprintf("projects/%s/zones/%s/instances/%s", project, zone, instance),
+		instanceURI: instanceData.SelfLink,
 		mountPath:   mountPath,
 	}
 
