@@ -69,7 +69,11 @@ func (p *cloudvolPlugin) Get(r volume.Request) volume.Response {
 		return volume.Response{Err: fmt.Sprintf("error getting volume '%s': %v", r.Name, err)}
 	}
 
-	log.WithFields(log.Fields{"name": vol.Name, "mount": vol.Path}).Info("RESPONSE: Get: found")
+	log.WithFields(log.Fields{
+		"name":  vol.Name,
+		"mount": vol.Path,
+		"ready": vol.Ready,
+	}).Info("RESPONSE: Get: found")
 	return volume.Response{Volume: &volume.Volume{Name: vol.Name, Mountpoint: vol.Path}}
 }
 

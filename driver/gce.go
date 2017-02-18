@@ -218,18 +218,36 @@ func (d *gceDriver) getVolume(id string) (*gceVolume, error) {
 		diskURI: disk.SelfLink,
 	}
 
+	log.WithFields(log.Fields{
+		"disk":  disk.Name,
+		"users": disk.Users,
+	}).Info("GCE: found disk")
+
 	if stringInSlice(disk.Users, d.instanceURI) {
 		// this disk is already attached
 		vol.Ready = true
+		log.WithFields(log.Fields{"disk": disk.Name}).Info("disk is attached to current instance")
+
 		attachment, err := d.getAttachedDisk(d.instance, disk.SelfLink)
+		if err != nil {
+			return nil, fmt.Errorf("GCE: unable to get mount info for disk '%s': %v", id, err)
+		}
+
 		vol.devicePath = fmt.Sprintf(devicePathFormat, attachment.DeviceName)
 
 		vol.Path, err = mountpath.GetMountPath(vol.devicePath)
 		if err != nil {
 			return nil, fmt.Errorf("GCE: unable to get mount info for disk '%s': %v", id, err)
 		}
+
+		log.WithFields(log.Fields{
+			"disk":       disk.Name,
+			"devicePath": vol.devicePath,
+			"mount":      vol.Path,
+		}).Info("GCE: found volume attachment")
 	}
 
+	log.WithFields(log.Fields{"disk": disk.Name}).Info("disk not attached to current instance")
 	return vol, nil
 }
 
