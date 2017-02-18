@@ -125,6 +125,9 @@ func (d *gceDriver) List() ([]*Volume, error) {
 // Get gets info about a volume
 func (d *gceDriver) Get(id string) (*Volume, error) {
 	vol, err := d.getVolume(id)
+	if err != nil {
+		return nil, err
+	}
 	return &vol.Volume, err
 }
 
