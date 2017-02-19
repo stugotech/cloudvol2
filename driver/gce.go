@@ -10,6 +10,8 @@ import (
 
 	"strconv"
 
+	"errors"
+
 	"cloud.google.com/go/compute/metadata"
 	log "github.com/Sirupsen/logrus"
 	"github.com/gordonmleigh/mountpath"
@@ -279,22 +281,31 @@ func (d *gceDriver) parseVolumeOptions(opts map[string]string) (*gceVolumeOption
 		sizeGb: defaultVolumeSizeGb,
 	}
 
-	if sizeStr, exists := opts["sizeGb"]; exists {
-		var err error
-		if parsed.sizeGb, err = strconv.ParseInt(sizeStr, 10, 64); err != nil {
-			return nil, fmt.Errorf("GCE: error parsing 'sizeGb' option value '%s': %v", sizeStr, err)
+	for key, value := range opts {
+		if err := d.parseVolumeOption(parsed, key, value); err != nil {
+			return nil, err
 		}
-	}
-
-	if diskTypeName, exists := opts["type"]; exists {
-		diskType, err := d.getDiskType(diskTypeName)
-		if err != nil {
-			return nil, fmt.Errorf("GCE: error processing 'type' option value '%s': %v", diskTypeName, err)
-		}
-		parsed.diskTypeURI = diskType.SelfLink
 	}
 
 	return parsed, nil
+}
+
+// parseVolumeOption parses a single option
+func (d *gceDriver) parseVolumeOption(opts *gceVolumeOptions, key string, value string) error {
+	var err error
+	switch key {
+	case "sizeGb":
+		if sizeGb, err := strconv.ParseInt(value, 10, 64); err == nil {
+			opts.sizeGb = sizeGb
+		}
+	case "type":
+		if diskType, err := d.getDiskType(value); err == nil {
+			opts.diskTypeURI = diskType.SelfLink
+		}
+	default:
+		return errors.New("unknown option")
+	}
+	return err
 }
 
 // createDisk creates a new disk
