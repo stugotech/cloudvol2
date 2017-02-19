@@ -29,8 +29,19 @@ func (p *cloudvolPlugin) Capabilities(r volume.Request) volume.Response {
 // Create creates a new volume.
 func (p *cloudvolPlugin) Create(r volume.Request) volume.Response {
 	log.WithFields(log.Fields{"name": r.Name, "opts": r.Options}).Info("REQUEST: Create")
-	log.WithFields(log.Fields{"name": r.Name}).Error("RESPONSE: Create: not supported")
-	return volume.Response{Err: fmt.Sprintf("not supported")}
+
+	vol, err := p.driver.Create(r.Name, r.Options)
+	if err != nil {
+		log.WithFields(log.Fields{"name": r.Name, "err": err}).Error("RESPONSE: Create: error")
+		return volume.Response{Err: fmt.Sprintf("error creating volume '%s': %v", r.Name, err)}
+	}
+
+	return volume.Response{
+		Volume: &volume.Volume{
+			Name:       vol.Name,
+			Mountpoint: vol.Path,
+		},
+	}
 }
 
 // List lists all volumes the driver knows of.
@@ -80,8 +91,13 @@ func (p *cloudvolPlugin) Get(r volume.Request) volume.Response {
 // Remove deletes a specific volume.
 func (p *cloudvolPlugin) Remove(r volume.Request) volume.Response {
 	log.WithFields(log.Fields{"name": r.Name}).Info("REQUEST: Remove")
-	log.WithFields(log.Fields{"name": r.Name}).Error("RESPONSE: Remove: not supported")
-	return volume.Response{Err: fmt.Sprintf("not supported")}
+
+	if err := p.driver.Remove(r.Name); err != nil {
+		log.WithFields(log.Fields{"name": r.Name, "err": err}).Error("RESPONSE: Remove: error")
+		return volume.Response{Err: fmt.Sprintf("error removing volume '%s': %v", r.Name, err)}
+	}
+
+	return volume.Response{}
 }
 
 // Path gets the path of a given volume.

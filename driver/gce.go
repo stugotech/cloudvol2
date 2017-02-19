@@ -8,6 +8,8 @@ import (
 
 	"path"
 
+	"strconv"
+
 	"cloud.google.com/go/compute/metadata"
 	log "github.com/Sirupsen/logrus"
 	"github.com/gordonmleigh/mountpath"
@@ -21,6 +23,7 @@ const (
 	devicePathFormat      = "/dev/disk/by-id/google-%s"
 	operationWaitTimeout  = 5 * time.Second
 	operationPollInterval = 100 * time.Millisecond
+	defaultVolumeSizeGb   = 10
 )
 
 type gceDriver struct {
@@ -30,12 +33,18 @@ type gceDriver struct {
 	instance    string
 	instanceURI string
 	mountPath   string
+	diskTypes   map[string]*compute.DiskType
 }
 
 type gceVolume struct {
 	Volume
 	diskURI    string
 	devicePath string
+}
+
+type gceVolumeOptions struct {
+	sizeGb      int64
+	diskTypeURI string
 }
 
 // NewGceDriver creates a new instance of the GCE volume driver
@@ -103,6 +112,43 @@ func NewGceDriver(mountPath string) (Driver, error) {
 	return provider, nil
 }
 
+// Create makes a new volume
+func (d *gceDriver) Create(id string, optsMap map[string]string) (*Volume, error) {
+	// parse options
+	opts, err := d.parseVolumeOptions(optsMap)
+	if err != nil {
+		return nil, err
+	}
+
+	// create disk
+	vol, err := d.createDisk(id, opts)
+	if err != nil {
+		return nil, err
+	}
+
+	// attach
+	if err = d.attachDisk(vol); err != nil {
+		return nil, err
+	}
+
+	// format
+	if err = fs.Format(vol.devicePath); err != nil {
+		return nil, fmt.Errorf("GCE: error formatting new volume '%s': %v", id, err)
+	}
+
+	// mount
+	if err = d.mountDisk(vol); err != nil {
+		return nil, err
+	}
+
+	return &vol.Volume, err
+}
+
+// Remove deletes a disk
+func (d *gceDriver) Remove(id string) error {
+	return fmt.Errorf("GCE: Remove not supported")
+}
+
 // List gets info about disks from GCE
 func (d *gceDriver) List() ([]*Volume, error) {
 	ctx := context.Background()
@@ -144,33 +190,16 @@ func (d *gceDriver) Mount(id string) (string, error) {
 
 	if !vol.Ready {
 		// attach
-		attachment := &compute.AttachedDisk{
-			DeviceName: id,
-			Source:     vol.diskURI,
-		}
-		vol.devicePath = fmt.Sprintf(devicePathFormat, id)
-
-		op, err := d.client.Instances.AttachDisk(d.project, d.zone, d.instance, attachment).Do()
-		if err != nil {
-			return "", fmt.Errorf("GCE: error attaching volume '%s'", id)
-		}
-		err = d.waitForOp(op)
-		if err != nil {
-			return "", fmt.Errorf("GCE: error attaching volume '%s'", id)
+		if err = d.attachDisk(vol); err != nil {
+			return "", err
 		}
 	}
 
 	// mount
-	mountPoint := path.Join(d.mountPath, vol.Name)
-
-	if err = fs.CreateDir(mountPoint, true, 700); err != nil {
-		return "", fmt.Errorf("GCE: error creating mount point '%s' for volume '%s': %v", mountPoint, id, err)
+	if err = d.mountDisk(vol); err != nil {
+		return "", err
 	}
-	if err = fs.Mount(vol.devicePath, mountPoint); err != nil {
-		return "", fmt.Errorf("GCE: error mounting volume '%s' on '%s': %v", id, mountPoint, err)
-	}
-	vol.Path = mountPoint
-	return mountPoint, nil
+	return vol.Path, nil
 }
 
 // Unmount unmounts a volume
@@ -185,30 +214,14 @@ func (d *gceDriver) Unmount(id string) error {
 	}
 
 	// unmount
-	if err = fs.Unmount(vol.Path); err != nil {
-		return fmt.Errorf("GCE: error unmounting volume '%s' from '%s': %v", id, vol.Path, err)
+	if err = d.unmountDisk(vol); err != nil {
+		return err
 	}
-
-	if err = fs.RemoveDir(vol.Path, true); err != nil {
-		log.WithFields(log.Fields{
-			"name":  vol.Name,
-			"mount": vol.Path,
-			"err":   err,
-		}).Warn("GCE: error removing mountpoint")
-	}
-
-	vol.Path = ""
 
 	// detach
-	op, err := d.client.Instances.DetachDisk(d.project, d.zone, d.instance, id).Do()
-	if err != nil {
-		return fmt.Errorf("GCE: error detaching volume '%s': %v", id, err)
+	if err = d.detachDisk(vol); err != nil {
+		return err
 	}
-	err = d.waitForOp(op)
-	if err != nil {
-		return fmt.Errorf("GCE: error detatching '%s': %v", id, err)
-	}
-
 	return nil
 }
 
@@ -260,6 +273,127 @@ func (d *gceDriver) getVolume(id string) (*gceVolume, error) {
 	return vol, nil
 }
 
+// parseVolumeOptions parses the string options
+func (d *gceDriver) parseVolumeOptions(opts map[string]string) (*gceVolumeOptions, error) {
+	parsed := &gceVolumeOptions{
+		sizeGb: defaultVolumeSizeGb,
+	}
+
+	if sizeStr, exists := opts["sizeGb"]; exists {
+		var err error
+		if parsed.sizeGb, err = strconv.ParseInt(sizeStr, 10, 64); err != nil {
+			return nil, fmt.Errorf("GCE: error parsing 'sizeGb' option value '%s': %v", sizeStr, err)
+		}
+	}
+
+	if diskTypeName, exists := opts["type"]; exists {
+		diskType, err := d.getDiskType(diskTypeName)
+		if err != nil {
+			return nil, fmt.Errorf("GCE: error processing 'type' option value '%s': %v", diskTypeName, err)
+		}
+		parsed.diskTypeURI = diskType.SelfLink
+	}
+
+	return parsed, nil
+}
+
+// createDisk creates a new disk
+func (d *gceDriver) createDisk(id string, opts *gceVolumeOptions) (*gceVolume, error) {
+	disk := &compute.Disk{
+		Name:   id,
+		SizeGb: opts.sizeGb,
+		Type:   opts.diskTypeURI,
+	}
+
+	op, err := d.client.Disks.Insert(d.project, d.zone, disk).Do()
+	if err != nil {
+		return nil, fmt.Errorf("GCE: error creating disk '%s': %v", id, err)
+	}
+
+	err = d.waitForOp(op)
+	if err != nil {
+		return nil, fmt.Errorf("GCE: error creating disk '%s': %v", id, err)
+	}
+
+	vol := &gceVolume{
+		Volume: Volume{
+			Name: id,
+		},
+		diskURI: op.TargetLink,
+	}
+
+	return vol, nil
+}
+
+// attachDisk attaches a disk to the current instance
+func (d *gceDriver) attachDisk(vol *gceVolume) error {
+	attachment := &compute.AttachedDisk{
+		DeviceName: vol.Name,
+		Source:     vol.diskURI,
+	}
+	devicePath := fmt.Sprintf(devicePathFormat, vol.Name)
+
+	op, err := d.client.Instances.AttachDisk(d.project, d.zone, d.instance, attachment).Do()
+	if err != nil {
+		return fmt.Errorf("GCE: error attaching volume '%s'", vol.Name)
+	}
+	err = d.waitForOp(op)
+	if err != nil {
+		return fmt.Errorf("GCE: error attaching volume '%s'", vol.Name)
+	}
+
+	// set this only on success
+	vol.devicePath = devicePath
+	vol.Ready = true
+	return nil
+}
+
+// detachDisk detaches a disk from the current instance
+func (d *gceDriver) detachDisk(vol *gceVolume) error {
+	op, err := d.client.Instances.DetachDisk(d.project, d.zone, d.instance, vol.Name).Do()
+	if err != nil {
+		return fmt.Errorf("GCE: error detaching volume '%s': %v", vol.Name, err)
+	}
+	err = d.waitForOp(op)
+	if err != nil {
+		return fmt.Errorf("GCE: error detatching volume '%s': %v", vol.Name, err)
+	}
+	vol.devicePath = ""
+	return nil
+}
+
+// mountDisk mounts a disk device on the current instance
+func (d *gceDriver) mountDisk(vol *gceVolume) error {
+	mountPoint := path.Join(d.mountPath, vol.Name)
+
+	if err := fs.CreateDir(mountPoint, true, 700); err != nil {
+		return fmt.Errorf("GCE: error creating mount point '%s' for volume '%s': %v", mountPoint, vol.Name, err)
+	}
+	if err := fs.Mount(vol.devicePath, mountPoint); err != nil {
+		return fmt.Errorf("GCE: error mounting volume '%s' on '%s': %v", vol.Name, mountPoint, err)
+	}
+	vol.Path = mountPoint
+	return nil
+}
+
+// unmountDisk removes a disk from the file system
+func (d *gceDriver) unmountDisk(vol *gceVolume) error {
+	if err := fs.Unmount(vol.Path); err != nil {
+		return fmt.Errorf("GCE: error unmounting volume '%s' from '%s': %v", vol.Name, vol.Path, err)
+	}
+
+	if err := fs.RemoveDir(vol.Path, true); err != nil {
+		log.WithFields(log.Fields{
+			"name":  vol.Name,
+			"mount": vol.Path,
+			"err":   err,
+		}).Warn("GCE: error removing mountpoint")
+	}
+
+	vol.Path = ""
+	return nil
+}
+
 // getAttachedDisk gets the disk attachment info for a disk
 func (d *gceDriver) getAttachedDisk(instanceName string, diskURI string) (*compute.AttachedDisk, error) {
 	instance, err := d.client.Instances.Get(d.project, d.zone, instanceName).Do()
@@ -272,6 +406,41 @@ func (d *gceDriver) getAttachedDisk(instanceName string, diskURI string) (*compu
 		}
 	}
 	return nil, nil
+}
+
+// getDiskType tries to get a disk type by name from the cache and refreshes the cache if not found
+func (d *gceDriver) getDiskType(name string) (*compute.DiskType, error) {
+	fresh := false
+
+	for !fresh {
+		if d.diskTypes == nil {
+			if err := d.loadDiskTypes(); err != nil {
+				return nil, err
+			}
+			fresh = true
+		}
+		if disk, exists := d.diskTypes[name]; exists {
+			return disk, nil
+		}
+		// invalidate cache
+		d.diskTypes = nil
+	}
+	return nil, fmt.Errorf("disk type '%s' not found", name)
+}
+
+// loadDiskTypes caches the disk type for the current zone
+func (d *gceDriver) loadDiskTypes() error {
+	call := d.client.DiskTypes.List(d.project, d.zone)
+	d.diskTypes = make(map[string]*compute.DiskType)
+
+	err := call.Pages(context.Background(), func(page *compute.DiskTypeList) error {
+		for _, disk := range page.Items {
+			d.diskTypes[disk.Name] = disk
+		}
+		return nil
+	})
+
+	return err
 }
 
 // waitForOp waits for an operation to complete
