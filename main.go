@@ -7,7 +7,9 @@ import (
 
 	log "github.com/Sirupsen/logrus"
 	"github.com/docker/go-plugins-helpers/volume"
+	"github.com/gordonmleigh/redpill"
 	"github.com/stugotech/cloudvol2/driver"
+	"github.com/stugotech/cloudvol2/fs"
 	"github.com/stugotech/cloudvol2/plugin"
 )
 
@@ -24,9 +26,21 @@ func main() {
 	sock := flag.Bool("sock", false, "listen on a unix socket")
 	flag.Parse()
 
-	log.WithFields(log.Fields{"mode": *mode}).Info("creating storage driver")
+	var cfs fs.Filesystem
+	c, err := redpill.GetContainerID()
+	if err != nil {
+		log.WithError(err).Warn("can't get container id")
+	}
 
-	d, err := createStorageDriver(*mode, mountPath)
+	if c != "" {
+		log.WithFields(log.Fields{"container": c}).Info("running in container")
+		cfs = fs.NewFilesystemBasePath("/host")
+	} else {
+		cfs = fs.NewFilesystem()
+	}
+
+	log.WithFields(log.Fields{"mode": *mode}).Info("creating storage driver")
+	d, err := createStorageDriver(*mode, mountPath, cfs)
 
 	if err != nil {
 		log.WithError(err).Fatal("stopping due to last error")
@@ -51,9 +65,9 @@ func main() {
 	}
 }
 
-func createStorageDriver(name string, mountPath string) (driver.Driver, error) {
+func createStorageDriver(name string, mountPath string, cfs fs.Filesystem) (driver.Driver, error) {
 	if name == "gce" {
-		return driver.NewGceDriver(mountPath)
+		return driver.NewGceDriver(mountPath, cfs)
 	}
 	return nil, fmt.Errorf("unknown driver type '%s'", name)
 }

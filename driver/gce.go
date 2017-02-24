@@ -29,6 +29,7 @@ const (
 )
 
 type gceDriver struct {
+	fs          fs.Filesystem
 	client      *compute.Service
 	project     string
 	zone        string
@@ -50,7 +51,7 @@ type gceVolumeOptions struct {
 }
 
 // NewGceDriver creates a new instance of the GCE volume driver
-func NewGceDriver(mountPath string) (Driver, error) {
+func NewGceDriver(mountPath string, fs fs.Filesystem) (Driver, error) {
 	if !metadata.OnGCE() {
 		log.Warn("GCE: not on GCE or can't contact metadata server")
 		return nil, fmt.Errorf("GCE: not on GCE or can't contact metadata server")
@@ -103,6 +104,7 @@ func NewGceDriver(mountPath string) (Driver, error) {
 	}
 
 	provider := &gceDriver{
+		fs:          fs,
 		client:      computeService,
 		instance:    instance,
 		zone:        zone,
@@ -134,7 +136,7 @@ func (d *gceDriver) Create(id string, optsMap map[string]string) (*Volume, error
 	}
 
 	// format
-	if err = fs.Format(vol.devicePath); err != nil {
+	if err = d.fs.Format(vol.devicePath); err != nil {
 		return nil, fmt.Errorf("GCE: error formatting new volume '%s': %v", id, err)
 	}
 
@@ -283,7 +285,7 @@ func (d *gceDriver) parseVolumeOptions(opts map[string]string) (*gceVolumeOption
 
 	for key, value := range opts {
 		if err := d.parseVolumeOption(parsed, key, value); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("GCE: error processing option '%s' with value '%s': %v", key, value, err)
 		}
 	}
 
@@ -377,10 +379,10 @@ func (d *gceDriver) detachDisk(vol *gceVolume) error {
 func (d *gceDriver) mountDisk(vol *gceVolume) error {
 	mountPoint := path.Join(d.mountPath, vol.Name)
 
-	if err := fs.CreateDir(mountPoint, true, 700); err != nil {
+	if err := d.fs.CreateDir(mountPoint, true, 700); err != nil {
 		return fmt.Errorf("GCE: error creating mount point '%s' for volume '%s': %v", mountPoint, vol.Name, err)
 	}
-	if err := fs.Mount(vol.devicePath, mountPoint); err != nil {
+	if err := d.fs.Mount(vol.devicePath, mountPoint); err != nil {
 		return fmt.Errorf("GCE: error mounting volume '%s' on '%s': %v", vol.Name, mountPoint, err)
 	}
 	vol.Path = mountPoint
@@ -389,11 +391,11 @@ func (d *gceDriver) mountDisk(vol *gceVolume) error {
 
 // unmountDisk removes a disk from the file system
 func (d *gceDriver) unmountDisk(vol *gceVolume) error {
-	if err := fs.Unmount(vol.Path); err != nil {
+	if err := d.fs.Unmount(vol.Path); err != nil {
 		return fmt.Errorf("GCE: error unmounting volume '%s' from '%s': %v", vol.Name, vol.Path, err)
 	}
 
-	if err := fs.RemoveDir(vol.Path, true); err != nil {
+	if err := d.fs.RemoveDir(vol.Path, true); err != nil {
 		log.WithFields(log.Fields{
 			"name":  vol.Name,
 			"mount": vol.Path,
