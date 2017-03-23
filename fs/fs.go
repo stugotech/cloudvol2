@@ -90,7 +90,7 @@ func (fs *fsInfo) Mount(device string, target string) error {
 // Unmount unmounts a block device
 func (fs *fsInfo) Unmount(target string) error {
 	target = fs.resolve(target)
-	return fs.osExec("unmount", target)
+	return fs.osExec("umount", target)
 }
 
 // Format formats a block device
